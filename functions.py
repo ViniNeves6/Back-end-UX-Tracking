@@ -3,6 +3,7 @@ import json
 import string
 import random
 import pandas as pd
+import io
 import os
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
@@ -374,35 +375,17 @@ def id_generator():
 
 ###############
 # plot functions
-def make_heatmap(folder):
-    df_trace = pd.read_csv(f"{folder}/trace.csv")
-    try:
-        df_audio = pd.read_csv(f"{folder}/audio.csv")
-    except:
-        df_audio = pd.DataFrame(
-            columns=[
-                "site",
-                "time",
-                "text",
-                "image",
-                "class",
-                "id",
-                "mouseClass",
-                "mouseId",
-                "x",
-                "y",
-                "scroll",
-                "height",
-            ]
-        )
+def make_heatmap(username, collection_name): #substituir collection name pelo nome da coleção
+    collection = db[collection_name] #substituir collection name pelo nome da coleção (acho que será duas collections, uma para aúdio e outras para traços)
+    # Consulta ao MongoDB para obter dados de trace e audio
+    df_trace = pd.DataFrame(list(collection.find({"type": "trace", "username": username})))
+    df_audio = pd.DataFrame(list(collection.find({"type": "audio", "username": username})))
 
-    for i in range(df_trace.shape[0]):
-        try:
-            im = Image.open(f"{folder}/{df_trace.image[i]}")
-            im0 = base64.b64encode(open(f"{folder}/{df_trace.image[i]}", "rb").read())
-            break
-        except:
-            None
+
+    if not df_trace.empty and "image" in df_trace.columns:
+        first_image_data = df_trace.iloc[0]["imageData"]  # Ajustar para a estrutura de dados
+        im = Image.open(io.BytesIO(base64.b64decode(first_image_data)))
+        im0 = base64.b64encode(io.BytesIO(base64.b64decode(first_image_data)).read()).decode('utf-8')
 
     width, height = im.size
     frames = []
@@ -415,95 +398,77 @@ def make_heatmap(folder):
         [0.85, "rgba(255, 90, 50, 0.85)"],
         [1, "rgba(255, 1, 0, 1)"],
     ]
-    for time in range(df_trace["time"].max()):
+    for time in sorted(df_trace["time"].unique()):
         filtered_df = df_trace[df_trace["time"] == time]
-        for image in filtered_df.image.unique():
-            plot_df = filtered_df[filtered_df["image"] == image]
+    for _, row in filtered_df.iterrows():
+        plot_df = filtered_df[filtered_df["image"] == row["image"]]
+        
+        # Preparação dos dados para o heatmap
+        x_bins = np.linspace(0, width, 250)
+        y_bins = np.linspace(0, height, 250)
+        x = plot_df["x"]
+        y = (abs(plot_df["y"] - plot_df["scroll"])).values
+        histogram, x_edges, y_edges = np.histogram2d(x, y, bins=[x_bins, y_bins])
+        data_smoothed = gaussian_filter(histogram, sigma=12)
+        
+        # Busca o texto do áudio correspondente ao momento, se existir
+        audio_text = df_audio[df_audio["time"] == time]["text"].iloc[0] if time in df_audio.time.values else ""
+        
+        # A imagem já está em Base64, então você pode usá-la diretamente
+        img_base64 = row['imageData']  # Isso assume que 'imageData' contém a imagem em Base64
 
-            x_bins = np.linspace(0, width, 250)
-            y_bins = np.linspace(0, height, 250)
-
-            x = plot_df["x"]
-            y = (abs(plot_df["y"] - plot_df["scroll"])).values
-
-            # filtro gaussiano
-            histogram, x_edges, y_edges = np.histogram2d(x, y, bins=[x_bins, y_bins])
-            sigma = 12
-            data_smoothed = gaussian_filter(histogram, sigma=sigma)
-            if time in df_audio.time.values:
-                audio2text = df_audio.query(f"time == {time}")["text"].values
-                try:
-                    img = base64.b64encode(open(f"{folder}/{image}", "rb").read())
-                    frames.append(
-                        go.Frame(
-                            data=go.Heatmap(
-                                z=data_smoothed,
-                                x=x_edges,
-                                y=y_edges,
-                                colorscale=colorscale,
-                                showscale=False,
-                                hovertemplate="Posição X: %{x}<br>Posição Y: %{y}",
-                            ),
-                            name=time,
-                            layout=dict(
-                                images=[
-                                    dict(
-                                        source="data:image/jpg;base64,{}".format(
-                                            img.decode()
-                                        )
-                                    )
-                                ],
-                                annotations=[
-                                    dict(
-                                        x=0.5,
-                                        y=0.04,
-                                        xref="paper",
-                                        yref="paper",
-                                        text=f"Falado: {audio2text[0]}",
-                                        font=dict(
-                                            family="Courier New, monospace",
-                                            size=18,
-                                            color="#ffffff",
-                                        ),
-                                        bordercolor="#c7c7c7",
-                                        borderwidth=2,
-                                        borderpad=8,
-                                        bgcolor="rgb(36, 36, 36)",
-                                        opacity=1,
-                                    )
-                                ],
-                            ),
+    try:
+        frames.append(
+            go.Frame(
+                data=go.Heatmap(
+                    z=data_smoothed,
+                    x=x_edges,
+                    y=y_edges,
+                    colorscale=colorscale,
+                    showscale=False,
+                    hovertemplate="Posição X: %{x}<br>Posição Y: %{y}",
+                ),
+                name=str(time),
+                layout=dict(
+                    images=[
+                        dict(
+                            source=f"data:image/jpg;base64,{img_base64}",
+                            xref="x",
+                            yref="y",
+                            x=0,
+                            y=0,
+                            sizex=width,
+                            sizey=height,
+                            sizing="stretch",
+                            opacity=0.5,
+                            layer="below"
                         )
-                    )
-                except:
-                    None
-            else:
-                try:
-                    img = base64.b64encode(open(f"{folder}/{image}", "rb").read())
-                    frames.append(
-                        go.Frame(
-                            data=go.Heatmap(
-                                z=data_smoothed,
-                                x=x_edges,
-                                y=y_edges,
-                                colorscale=colorscale,
-                                showscale=False,
-                                hovertemplate="Posição X: %{x}<br>Posição Y: %{y}",
+                    ],
+                    annotations=[
+                        dict(
+                            x=0.5,
+                            y=0.04,
+                            xref="paper",
+                            yref="paper",
+                            text=f"Falado: {audio_text}",
+                            font=dict(
+                                family="Courier New, monospace",
+                                size=18,
+                                color="#ffffff",
                             ),
-                            name=time,
-                            layout=dict(
-                                images=[
-                                    dict(
-                                        source="data:image/jpg;base64,{}".format(
-                                            img.decode()
-                                        )
-                                    )
-                                ]
-                            ),
+                            bordercolor="#c7c7c7",
+                            borderwidth=2,
+                            borderpad=8,
+                            bgcolor="rgb(36, 36, 36)",
+                            opacity=1,
                         )
-                    )
-                except:
-                    None
+                    ],
+                ),
+            )
+        )
+
+    except:
+        None
     fig = go.Figure(
         data=frames[0].data,
         layout=go.Layout(
@@ -630,25 +595,40 @@ def make_heatmap(folder):
     return plot_as_string
 
 
-def make_recording(folder, **kwargs):
-    df_trace = pd.read_csv(f"{folder}/trace.csv")
+def make_recording(username, db, collection_name_trace, collection_name_image, **kwargs):
+    # Buscar dados de trace e imagem do MongoDB
+    df_trace = pd.DataFrame(list(db[collection_name_trace].find({"username": username})))
+
+    if df_trace.empty:
+        print("Nenhum dado de trace encontrado.")
+        return None
+
     plots = []
-
-    im = Image.open(f"{folder}/{df_trace.image[0]}")
-    width, height = im.size
-
     frames = {}
 
-    # verificar as primeiras ocorrencias dos frames
-    for site, group in df_trace.groupby("site"):
-        images = group["image"].unique()
-        frames[site] = {}
-        for frame in images:
-            id0 = group[group["image"] == frame].index[0]
-            columns = group.loc[id0, ["scroll", "height"]]
-            frames[site][frame] = columns.to_dict()
+    # Agora, assumindo que cada documento de trace tem um campo 'image_id' referenciando um documento na coleção de imagens
+    first_image_doc = db[collection_name_image].find_one({"_id": df_trace.iloc[0]["image_id"]})
+    if first_image_doc:
+        im = Image.open(io.BytesIO(base64.b64decode(first_image_doc["imageData"])))
+        width, height = im.size
+    else:
+        print("Imagem inicial não encontrada.")
+        return None
 
-    full_ims = gen_fullpage(folder, width, height, frames)
+    # Verificar as primeiras ocorrências dos frames
+    for site, group in df_trace.groupby("site"):
+        images_ids = group["image_id"].unique()
+        frames[site] = {}
+        for image_id in images_ids:
+            image_doc = db[collection_name_image].find_one({"_id": image_id})
+            if image_doc:
+                id0 = group[group["image_id"] == image_id].index[0]
+                columns = group.loc[id0, ["scroll", "height"]]
+                frames[site][str(image_id)] = columns.to_dict()
+
+    full_ims = gen_fullpage_mongodb(username, db, width, height, frames, collection_name_image)
+
+
 
     # Definindo os ícones para cada tipo de interação (ref: https://plotly.com/python/marker-style/)
     type_icon = {
@@ -743,19 +723,22 @@ def make_recording(folder, **kwargs):
     return plots
 
 
-def gen_fullpage(folder, width, height, frames):
+def gen_fullpage_mongodb(db, collection_name_image, width, height, frames):
     full_ims = {}
 
-    for site, image in frames.items():
-        height = int(height + max(item["scroll"] for item in image.values()))
+    for site, images_data in frames.items():
+        # Calcula a altura total considerando o scroll máximo
+        height = int(height + max(item["scroll"] for item in images_data.values()))
         compose_im = Image.new("RGB", (width, height), "white")
 
-        for image, item in image.items():
-            try:
-                img = Image.open(f"{folder}/{str(image)}")
+        for image_id, item in images_data.items():
+            # Recupera a imagem do MongoDB usando o ID da imagem
+            image_doc = db[collection_name_image].find_one({"_id": image_id}) #criar uma collection para imagem ou deixar a imagem na collection do próprio user?
+            if image_doc:
+                
+                img_data = base64.b64decode(image_doc["imageData"])
+                img = Image.open(io.BytesIO(img_data))
                 compose_im.paste(img, (0, int(item["scroll"])))
-            except:
-                pass
 
         full_ims[site] = compose_im
 
@@ -766,3 +749,5 @@ def plot_image(img, figsize_in_inches=(5, 5)):
     fig, ax = plt.subplots(figsize=figsize_in_inches)
     ax.imshow(cv.cvtColor(img, cv.COLOR_BGR2RGB))
     plt.show()
+
+    
